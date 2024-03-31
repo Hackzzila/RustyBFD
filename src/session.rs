@@ -187,6 +187,15 @@ impl Session {
     }
 
     self.remote_state = packet.state;
+
+    if self.remote_min_rx != packet.required_min_rx {
+      info!(
+        old = ?self.remote_min_rx,
+        new = ?packet.required_min_rx,
+        "remote min RX interval changed"
+      );
+    }
+
     self.remote_min_rx = packet.required_min_rx;
     self.remote_demand_mode = packet.demand_mode;
 
@@ -223,7 +232,17 @@ impl Session {
       (_, _) => {}
     }
 
+    if self.local_diagnostic != Diagnostic::NoDiagnostic {
+      info!(diagnostic = ?self.local_diagnostic, "local diagnostic set");
+    }
+
     if old_state != self.state {
+      info!(
+        old = ?old_state,
+        new = ?self.state,
+        "local session state changed"
+      );
+
       events.push(SessionEvent::StateChange {
         old: old_state,
         new: self.state,
