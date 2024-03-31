@@ -10,7 +10,7 @@ use tokio::{
   sync::mpsc::{self, Receiver},
   time::{Instant, Sleep},
 };
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use crate::{
   client::{Client, Event},
@@ -66,7 +66,7 @@ impl Client {
       remote_addr: opt.remote_addr,
       sleep: Box::pin(tokio::time::sleep_until(Instant::now())),
       set_poll: true,
-      tx_interval: Duration::from_secs(1),
+      timeout_sleep: Box::pin(tokio::time::sleep_until(Instant::now())),
       detection_time: Duration::ZERO,
     }
   }
@@ -90,7 +90,7 @@ pub struct Session {
   remote_addr: IpAddr,
   sleep: Pin<Box<Sleep>>,
   set_poll: bool,
-  tx_interval: Duration,
+  timeout_sleep: Pin<Box<Sleep>>,
   detection_time: Duration,
 }
 
@@ -105,6 +105,18 @@ impl Session {
       _ = &mut self.sleep => {
         self.send_packet(false).await;
         Vec::new()
+      }
+
+      _ = &mut self.timeout_sleep => {
+        if self.state == SessionState::Up {
+          warn!("session timed out");
+          self.local_diagnostic = Diagnostic::TimeExpired;
+          self.state = SessionState::Down;
+          self.send_packet(false).await;
+          Vec::new()
+        } else {
+          Vec::new()
+        }
       }
     }
   }
@@ -151,6 +163,8 @@ impl Session {
   }
 
   async fn handle_packet(&mut self, packet: ControlPacket) -> Vec<SessionEvent> {
+    self.timeout_sleep.as_mut().reset(Instant::now() + self.detection_time);
+
     let mut events = Vec::new();
 
     if packet.diagnostic != Diagnostic::NoDiagnostic {
@@ -198,6 +212,14 @@ impl Session {
 
     self.remote_min_rx = packet.required_min_rx;
     self.remote_demand_mode = packet.demand_mode;
+
+    self.detection_time = Duration::from_secs_f64(
+      packet
+        .desired_min_tx
+        .as_secs_f64()
+        .max(self.required_min_rx.as_secs_f64())
+        * (packet.detect_mult as f64),
+    );
 
     if packet.fin {
       self.set_poll = false;
