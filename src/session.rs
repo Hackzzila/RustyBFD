@@ -1,4 +1,5 @@
 use std::{
+  fmt::Debug,
   net::{IpAddr, SocketAddr},
   pin::Pin,
   time::Duration,
@@ -16,14 +17,6 @@ use crate::{
   client::{Client, Event},
   packet::{ControlPacket, Diagnostic, SessionState},
 };
-
-#[derive(Debug, Clone)]
-pub enum SessionEvent {
-  RemoteDiscriminatorChange { old: u32, new: u32 },
-  StateChange { old: SessionState, new: SessionState },
-  RemoteStateChange { old: SessionState, new: SessionState },
-  RemoteDiagnostic(Diagnostic),
-}
 
 #[derive(Debug, Clone)]
 pub struct SessionOpt {
@@ -56,6 +49,7 @@ impl Client {
       local_discriminator: opt.local_discriminator,
       remote_discriminator: 0,
       local_diagnostic: Diagnostic::NoDiagnostic,
+      remote_diagnostic: Diagnostic::NoDiagnostic,
       desired_min_tx: opt.desired_min_tx,
       required_min_rx: opt.required_min_rx,
       remote_min_rx: Duration::from_micros(1),
@@ -80,6 +74,7 @@ pub struct Session {
   local_discriminator: u32,
   remote_discriminator: u32,
   local_diagnostic: Diagnostic,
+  remote_diagnostic: Diagnostic,
   desired_min_tx: Duration,
   required_min_rx: Duration,
   remote_min_rx: Duration,
@@ -95,8 +90,44 @@ pub struct Session {
 }
 
 impl Session {
+  pub fn get_local_state(&self) -> SessionState {
+    self.state
+  }
+
+  pub fn get_remote_state(&self) -> SessionState {
+    self.remote_state
+  }
+
+  pub fn get_local_discriminator(&self) -> u32 {
+    self.local_discriminator
+  }
+
+  pub fn get_remote_discriminator(&self) -> u32 {
+    self.remote_discriminator
+  }
+
+  pub fn get_local_diagnostic(&self) -> Diagnostic {
+    self.local_diagnostic
+  }
+
+  pub fn get_remote_diagnostic(&self) -> Diagnostic {
+    self.remote_diagnostic
+  }
+
   #[instrument(skip(self), fields(remote_addr = ?self.remote_addr))]
-  pub async fn poll(&mut self) -> Vec<SessionEvent> {
+  pub async fn poll(&mut self) {
+    fn log_if_changed<T: Debug + PartialEq>(old: T, new: T, msg: &str) {
+      if old != new {
+        info!(?old, ?new, "{}", msg)
+      }
+    }
+
+    let old_local_state = self.get_local_state();
+    let old_remote_state = self.get_remote_state();
+    let old_local_diagnostic = self.get_local_diagnostic();
+    let old_remote_diagnostic = self.get_remote_diagnostic();
+    let old_remote_discriminator = self.get_remote_discriminator();
+
     tokio::select! {
       Some(packet) = self.packet_rx.recv() => {
         self.handle_packet(packet).await
@@ -104,7 +135,6 @@ impl Session {
 
       _ = &mut self.sleep => {
         self.send_packet(false).await;
-        Vec::new()
       }
 
       _ = &mut self.timeout_sleep => {
@@ -113,12 +143,35 @@ impl Session {
           self.local_diagnostic = Diagnostic::TimeExpired;
           self.state = SessionState::Down;
           self.send_packet(false).await;
-          Vec::new()
-        } else {
-          Vec::new()
         }
       }
     }
+
+    log_if_changed(
+      old_remote_discriminator,
+      self.get_remote_discriminator(),
+      "remote discriminator changed",
+    );
+
+    log_if_changed(old_local_state, self.get_local_state(), "local session state changed");
+
+    log_if_changed(
+      old_remote_state,
+      self.get_remote_state(),
+      "remote session state changed",
+    );
+
+    log_if_changed(
+      old_local_diagnostic,
+      self.get_local_diagnostic(),
+      "local diagnostic changed",
+    );
+
+    log_if_changed(
+      old_remote_diagnostic,
+      self.get_remote_diagnostic(),
+      "remote diagnostic changed",
+    );
   }
 
   async fn send_packet(&mut self, fin: bool) {
@@ -162,7 +215,7 @@ impl Session {
       .unwrap();
   }
 
-  async fn handle_packet(&mut self, packet: ControlPacket) -> Vec<SessionEvent> {
+  async fn handle_packet(&mut self, packet: ControlPacket) {
     self.detection_time = Duration::from_secs_f64(
       packet
         .desired_min_tx
@@ -173,51 +226,9 @@ impl Session {
 
     self.timeout_sleep.as_mut().reset(Instant::now() + self.detection_time);
 
-    let mut events = Vec::new();
-
-    if packet.diagnostic != Diagnostic::NoDiagnostic {
-      info!(diagnostic = ?packet.diagnostic, "received diagnostic");
-      events.push(SessionEvent::RemoteDiagnostic(packet.diagnostic));
-    }
-
-    if self.remote_discriminator != packet.my_discriminator {
-      info!(
-        old = self.remote_discriminator,
-        new = packet.my_discriminator,
-        "remote discriminator changed"
-      );
-
-      events.push(SessionEvent::RemoteDiscriminatorChange {
-        old: self.remote_discriminator,
-        new: packet.my_discriminator,
-      });
-    }
-
     self.remote_discriminator = packet.my_discriminator;
-
-    if self.remote_state != packet.state {
-      info!(
-        old = ?self.remote_state,
-        new = ?packet.state,
-        "remote session state changed"
-      );
-
-      events.push(SessionEvent::RemoteStateChange {
-        old: self.remote_state,
-        new: packet.state,
-      });
-    }
-
     self.remote_state = packet.state;
-
-    if self.remote_min_rx != packet.required_min_rx {
-      info!(
-        old = ?self.remote_min_rx,
-        new = ?packet.required_min_rx,
-        "remote min RX interval changed"
-      );
-    }
-
+    self.remote_diagnostic = packet.diagnostic;
     self.remote_min_rx = packet.required_min_rx;
     self.remote_demand_mode = packet.demand_mode;
 
@@ -226,10 +237,8 @@ impl Session {
     }
 
     if self.state == SessionState::AdminDown {
-      return events;
+      return;
     }
-
-    let old_state = self.state;
 
     self.local_diagnostic = Diagnostic::NoDiagnostic;
     match (self.state, self.remote_state) {
@@ -254,27 +263,8 @@ impl Session {
       (_, _) => {}
     }
 
-    if self.local_diagnostic != Diagnostic::NoDiagnostic {
-      info!(diagnostic = ?self.local_diagnostic, "local diagnostic set");
-    }
-
-    if old_state != self.state {
-      info!(
-        old = ?old_state,
-        new = ?self.state,
-        "local session state changed"
-      );
-
-      events.push(SessionEvent::StateChange {
-        old: old_state,
-        new: self.state,
-      });
-    }
-
     if packet.poll {
       self.send_packet(true).await;
     }
-
-    events
   }
 }

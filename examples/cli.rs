@@ -1,7 +1,4 @@
-use std::{
-  net::{IpAddr, Ipv4Addr},
-  time::Duration,
-};
+use std::net::{IpAddr, Ipv4Addr};
 
 use clap::Parser;
 use rustybfd::*;
@@ -57,8 +54,6 @@ async fn main() {
     .await;
 
   loop {
-    for event in sess.poll().await {
-      debug!(?event, "received session event");
-    }
+    sess.poll().await;
   }
 }
