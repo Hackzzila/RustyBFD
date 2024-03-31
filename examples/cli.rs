@@ -5,6 +5,7 @@ use std::{
 
 use clap::Parser;
 use rustybfd::*;
+use tracing::debug;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -57,7 +58,7 @@ async fn main() {
 
   loop {
     for event in sess.poll().await {
-      println!("{event:?}");
+      debug!(?event, "received session event");
     }
   }
 }
