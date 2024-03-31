@@ -112,7 +112,8 @@ impl Session {
   async fn send_packet(&mut self, fin: bool) {
     let mut rng = rand::thread_rng();
     let jitter = rng.gen_range(0.75..=1.0);
-    let interval = Duration::from_secs_f64(self.remote_min_rx.as_secs_f64() * jitter);
+    let interval = self.remote_min_rx.as_secs_f64().max(self.desired_min_tx.as_secs_f64());
+    let interval = Duration::from_secs_f64(interval * jitter);
     let deadline = Instant::now() + interval;
     self.sleep.as_mut().reset(deadline);
 
@@ -123,7 +124,7 @@ impl Session {
       diagnostic: self.local_diagnostic,
       state: self.state,
       poll: self.set_poll,
-      fin: false,
+      fin,
       control_plane_independent: false,
       auth_present: false,
       demand_mode: false,
