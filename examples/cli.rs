@@ -33,25 +33,26 @@ async fn main() {
 
   let args = Args::parse();
 
-  let (client, mut event_loop) = Client::new().await.unwrap();
+  let mut client = Client::new().await.unwrap();
+
+  let (mut sess, handle) = Session::new(SessionOpt {
+    local_addr: IpAddr::V4(args.local_addr),
+    remote_addr: IpAddr::V4(args.remote_addr),
+    local_discriminator: args.local_discriminator.unwrap_or_else(rand::random),
+    demand_mode: false,
+    desired_min_tx: args.desired_min_tx.into(),
+    required_min_rx: args.required_min_rx.into(),
+    detect_mult: args.detect_mult,
+  })
+  .await;
+
+  client.register_session(handle);
 
   tokio::task::spawn(async move {
     loop {
-      event_loop.poll().await;
+      client.poll().await;
     }
   });
-
-  let mut sess = client
-    .new_session(SessionOpt {
-      local_addr: IpAddr::V4(args.local_addr),
-      remote_addr: IpAddr::V4(args.remote_addr),
-      local_discriminator: args.local_discriminator.unwrap_or_else(rand::random),
-      demand_mode: false,
-      desired_min_tx: args.desired_min_tx.into(),
-      required_min_rx: args.required_min_rx.into(),
-      detect_mult: args.detect_mult,
-    })
-    .await;
 
   loop {
     sess.poll().await;

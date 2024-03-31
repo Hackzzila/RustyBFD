@@ -8,15 +8,17 @@ use std::{
 use rand::Rng;
 use tokio::{
   net::UdpSocket,
-  sync::mpsc::{self, Receiver},
+  sync::mpsc::{self, Receiver, Sender},
   time::{Instant, Sleep},
 };
 use tracing::{info, instrument, warn};
 
-use crate::{
-  client::{Client, Event},
-  packet::{ControlPacket, Diagnostic, SessionState},
-};
+use crate::packet::{ControlPacket, Diagnostic, SessionState};
+
+pub struct SessionHandle {
+  pub(crate) remote_addr: IpAddr,
+  pub(crate) packet_tx: Sender<ControlPacket>,
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionOpt {
@@ -29,19 +31,13 @@ pub struct SessionOpt {
   pub detect_mult: u8,
 }
 
-impl Client {
-  pub async fn new_session(&self, opt: SessionOpt) -> Session {
+impl Session {
+  pub async fn new(opt: SessionOpt) -> (Session, SessionHandle) {
     let (packet_tx, packet_rx) = mpsc::channel(10);
     let tx_socket = UdpSocket::bind(SocketAddr::new(opt.local_addr, 0)).await.unwrap();
     tx_socket.set_ttl(255).unwrap();
 
-    self
-      .event_tx
-      .send(Event::NewSession(opt.remote_addr, packet_tx))
-      .await
-      .unwrap();
-
-    Session {
+    let sess = Session {
       packet_rx,
       tx_socket,
       state: SessionState::Down,
@@ -62,7 +58,14 @@ impl Client {
       set_poll: true,
       timeout_sleep: Box::pin(tokio::time::sleep_until(Instant::now())),
       detection_time: Duration::ZERO,
-    }
+    };
+
+    let handle = SessionHandle {
+      remote_addr: opt.remote_addr,
+      packet_tx,
+    };
+
+    (sess, handle)
   }
 }
 

@@ -3,68 +3,36 @@ use std::{
   net::{IpAddr, SocketAddr},
 };
 
-use tokio::{
-  io,
-  net::UdpSocket,
-  sync::mpsc::{self, Receiver, Sender},
-};
+use tokio::{io, net::UdpSocket, sync::mpsc::Sender};
 
-use crate::packet::ControlPacket;
-
-pub(crate) enum Event {
-  NewSession(IpAddr, Sender<ControlPacket>),
-}
+use crate::{packet::ControlPacket, session::SessionHandle};
 
 pub struct Client {
-  pub(crate) event_tx: Sender<Event>,
-}
-
-impl Client {
-  pub async fn new() -> Result<(Client, EventLoop), io::Error> {
-    let rx_socket = UdpSocket::bind("0.0.0.0:3784").await?;
-
-    let (event_tx, event_rx) = mpsc::channel(10);
-
-    let client = Self { event_tx };
-
-    let event_loop = EventLoop {
-      rx_socket,
-      event_rx,
-      discriminator_map: HashMap::new(),
-      addr_map: HashMap::new(),
-    };
-
-    Ok((client, event_loop))
-  }
-}
-
-pub struct EventLoop {
   rx_socket: UdpSocket,
-  event_rx: Receiver<Event>,
   discriminator_map: HashMap<u32, Sender<ControlPacket>>,
   addr_map: HashMap<IpAddr, Sender<ControlPacket>>,
 }
 
-impl EventLoop {
+impl Client {
+  pub async fn new() -> Result<Self, io::Error> {
+    let rx_socket = UdpSocket::bind("0.0.0.0:3784").await?;
+
+    Ok(Self {
+      rx_socket,
+      discriminator_map: HashMap::new(),
+      addr_map: HashMap::new(),
+    })
+  }
+
   pub async fn poll(&mut self) {
     let mut buf = [0; 1500];
-    tokio::select! {
-      Some(event) = self.event_rx.recv() => {
-        self.handle_event(event).await;
-      }
-
-      Ok((len, addr)) = self.rx_socket.recv_from(&mut buf) => {
-        self.handle_msg(&buf[0..len], addr).await;
-      }
+    if let Ok((len, addr)) = self.rx_socket.recv_from(&mut buf).await {
+      self.handle_msg(&buf[0..len], addr).await;
     }
   }
 
-  async fn handle_event(&mut self, event: Event) {
-    match event {
-      Event::NewSession(addr, tx) => {
-        self.addr_map.insert(addr, tx);
-      }
-    }
+  pub fn register_session(&mut self, handle: SessionHandle) {
+    self.addr_map.insert(handle.remote_addr, handle.packet_tx);
   }
 
   async fn handle_msg(&mut self, buf: &[u8], addr: SocketAddr) {
