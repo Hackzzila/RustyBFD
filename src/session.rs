@@ -10,12 +10,22 @@ use tokio::{
   sync::mpsc::{self, Receiver},
   time::{Instant, Sleep},
 };
+use tracing::{info, instrument};
 
 use crate::{
   client::{Client, Event},
   packet::{ControlPacket, Diagnostic, SessionState},
 };
 
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+  RemoteDiscriminatorChange { old: u32, new: u32 },
+  StateChange { old: SessionState, new: SessionState },
+  RemoteStateChange { old: SessionState, new: SessionState },
+  RemoteDiagnostic(Diagnostic),
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionOpt {
   pub local_addr: IpAddr,
   pub remote_addr: IpAddr,
@@ -85,14 +95,16 @@ pub struct Session {
 }
 
 impl Session {
-  pub async fn poll(&mut self) {
+  #[instrument(skip(self), fields(remote_addr = ?self.remote_addr))]
+  pub async fn poll(&mut self) -> Vec<SessionEvent> {
     tokio::select! {
       Some(packet) = self.packet_rx.recv() => {
-        self.handle_packet(packet).await;
+        self.handle_packet(packet).await
       }
 
       _ = &mut self.sleep => {
         self.send_packet(false).await;
+        Vec::new()
       }
     }
   }
@@ -116,7 +128,7 @@ impl Session {
       auth_present: false,
       demand_mode: false,
       multipoint: false,
-      detect_mult: 3,
+      detect_mult: self.detect_mult,
       my_discriminator: self.local_discriminator,
       your_discriminator: self.remote_discriminator,
       desired_min_tx: self.desired_min_tx,
@@ -137,10 +149,42 @@ impl Session {
       .unwrap();
   }
 
-  async fn handle_packet(&mut self, packet: ControlPacket) {
-    println!("received packet {packet:?}");
+  async fn handle_packet(&mut self, packet: ControlPacket) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+
+    if packet.diagnostic != Diagnostic::NoDiagnostic {
+      info!(diagnostic = ?packet.diagnostic, "received diagnostic");
+      events.push(SessionEvent::RemoteDiagnostic(packet.diagnostic));
+    }
+
+    if self.remote_discriminator != packet.my_discriminator {
+      info!(
+        old = self.remote_discriminator,
+        new = packet.my_discriminator,
+        "remote discriminator changed"
+      );
+
+      events.push(SessionEvent::RemoteDiscriminatorChange {
+        old: self.remote_discriminator,
+        new: packet.my_discriminator,
+      });
+    }
 
     self.remote_discriminator = packet.my_discriminator;
+
+    if self.remote_state != packet.state {
+      info!(
+        old = ?self.remote_state,
+        new = ?packet.state,
+        "remote session state changed"
+      );
+
+      events.push(SessionEvent::RemoteStateChange {
+        old: self.remote_state,
+        new: packet.state,
+      });
+    }
+
     self.remote_state = packet.state;
     self.remote_min_rx = packet.required_min_rx;
     self.remote_demand_mode = packet.demand_mode;
@@ -150,8 +194,10 @@ impl Session {
     }
 
     if self.state == SessionState::AdminDown {
-      return;
+      return events;
     }
+
+    let old_state = self.state;
 
     self.local_diagnostic = Diagnostic::NoDiagnostic;
     match (self.state, self.remote_state) {
@@ -176,8 +222,17 @@ impl Session {
       (_, _) => {}
     }
 
+    if old_state != self.state {
+      events.push(SessionEvent::StateChange {
+        old: old_state,
+        new: self.state,
+      });
+    }
+
     if packet.poll {
       self.send_packet(true).await;
     }
+
+    events
   }
 }
