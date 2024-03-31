@@ -163,6 +163,14 @@ impl Session {
   }
 
   async fn handle_packet(&mut self, packet: ControlPacket) -> Vec<SessionEvent> {
+    self.detection_time = Duration::from_secs_f64(
+      packet
+        .desired_min_tx
+        .as_secs_f64()
+        .max(self.required_min_rx.as_secs_f64())
+        * (packet.detect_mult as f64),
+    );
+
     self.timeout_sleep.as_mut().reset(Instant::now() + self.detection_time);
 
     let mut events = Vec::new();
@@ -212,14 +220,6 @@ impl Session {
 
     self.remote_min_rx = packet.required_min_rx;
     self.remote_demand_mode = packet.demand_mode;
-
-    self.detection_time = Duration::from_secs_f64(
-      packet
-        .desired_min_tx
-        .as_secs_f64()
-        .max(self.required_min_rx.as_secs_f64())
-        * (packet.detect_mult as f64),
-    );
 
     if packet.fin {
       self.set_poll = false;
